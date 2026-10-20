@@ -8,3 +8,6 @@
 > Commits you push to the connected branch sync back to Lovable and show up in
 > the editor, so keep the branch in a working state.
 <!-- LOVABLE:END -->
+
+- Trading rules (martingale, phases, profile) live as pure functions in src/lib/strategy.ts with tests in src/test/strategy.test.ts — keeps rules testable apart from UI.
+- Deriv connection is a browser WebSocket client (src/lib/deriv.ts); the user's token stays in browser storage, so no backend is needed.
