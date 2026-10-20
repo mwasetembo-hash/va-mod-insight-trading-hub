@@ -177,7 +177,7 @@ function Hub() {
     const nm = applyResult(mgCfg, s.mg, won);
     const np = Math.round((s.profit + net) * 100) / 100;
     setLedger((l) => [{ time: new Date().toLocaleTimeString(), symbol: s.demoMode ? "SIM" : s.symbol,
-      type: `${LABEL[c.type]}${c.barrier !== undefined ? " " + c.barrier : ""}`, stake: amt, result: won ? "WIN" : "LOSS", profit: net, sim: s.demoMode }, ...l].slice(0, 200));
+      type: `${LABEL[c.type]}${c.barrier !== undefined ? " " + c.barrier : ""}`, stake: amt, result: (won ? "WIN" : "LOSS") as Ledger["result"], profit: net, sim: s.demoMode }, ...l].slice(0, 200));
     setMg(nm); setProfit(np); setPhase((p) => p + 1);
     st.current = { ...st.current, mg: nm, profit: np, phase: s.phase + 1 };
     if (nm.stopped) { setMsg("Stopped: max martingale levels reached."); return false; }

@@ -1,7 +1,7 @@
 import { useEffect, useRef } from "react";
 
 export interface Candle { time: number; open: number; high: number; low: number; close: number; volume: number }
-interface Props { candles: Candle[]; bull: string; bear: string; poc: string; pocPrice?: number }
+interface Props { candles: Candle[]; bull: string; bear: string; poc: string; pocPrice?: number | undefined }
 
 export function PriceChart({ candles, bull, bear, poc, pocPrice }: Props) {
   const el = useRef<HTMLDivElement>(null);
