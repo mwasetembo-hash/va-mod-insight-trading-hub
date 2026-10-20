@@ -1,3 +1,4 @@
+// Indexed numeric arrays below are always in-bounds.
 export type ContractKind = "DIGITDIFF" | "DIGITOVER" | "DIGITUNDER" | "DIGITEVEN" | "DIGITODD";
 export type StrategyMode = "classic" | "overunder" | "differs" | "evenodd";
 
@@ -42,7 +43,7 @@ export function phasesFor(mode: StrategyMode): ContractKind[] {
 }
 
 export function digitFrequency(digits: number[]) {
-  const f = Array(10).fill(0) as number[];
+  const f: number[] = Array(10).fill(0);
   digits.forEach((d) => f[d]++);
   return f;
 }
