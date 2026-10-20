@@ -13,6 +13,7 @@ export function PriceChart({ candles, bull, bear, poc, pocPrice }: Props) {
       if (disposed || !el.current) return;
       const chart = lc.createChart(el.current, {
         autoSize: true,
+        localization: { locale: "en-US" },
         layout: { background: { color: "transparent" }, textColor: "#BFA8D9" },
         grid: { vertLines: { color: "rgba(255,215,0,0.05)" }, horzLines: { color: "rgba(255,215,0,0.05)" } },
         timeScale: { timeVisible: true, secondsVisible: true },
