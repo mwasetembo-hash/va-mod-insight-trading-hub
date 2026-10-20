@@ -11,10 +11,9 @@ export function PriceChart({ candles, bull, bear, poc, pocPrice }: Props) {
     let disposed = false;
     import("lightweight-charts").then((lc) => {
       if (disposed || !el.current) return;
-      const css = getComputedStyle(document.documentElement);
       const chart = lc.createChart(el.current, {
         autoSize: true,
-        layout: { background: { color: "transparent" }, textColor: css.getPropertyValue("--muted-foreground") || "#aaa" },
+        layout: { background: { color: "transparent" }, textColor: "#BFA8D9" },
         grid: { vertLines: { color: "rgba(255,215,0,0.05)" }, horzLines: { color: "rgba(255,215,0,0.05)" } },
         timeScale: { timeVisible: true, secondsVisible: true },
       });
