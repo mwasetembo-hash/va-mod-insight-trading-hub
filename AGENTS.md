@@ -11,3 +11,4 @@
 
 - Trading rules (martingale, phases, profile) live as pure functions in src/lib/strategy.ts with tests in src/test/strategy.test.ts — keeps rules testable apart from UI.
 - Deriv connection is a browser WebSocket client (src/lib/deriv.ts); the user's token stays in browser storage, so no backend is needed.
+- Deriv credential validation and public defaults live in src/lib/deriv-config.ts, separately from trading rules, so legacy and PAT formats can be tested without real credentials.

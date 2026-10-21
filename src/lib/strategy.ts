@@ -96,5 +96,4 @@ export function digitWins(type: ContractKind, barrier: number | undefined, d: nu
   }
 }
 
-export const isValidToken = (t: string) => /^[A-Za-z0-9]{12,40}$/.test(t.trim());
-export const isValidAppId = (t: string) => /^\d{1,8}$/.test(t.trim());
+export { isValidToken, isValidAppId } from "./deriv-config";
