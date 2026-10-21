@@ -2,8 +2,10 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PriceChart, type Candle } from "@/components/PriceChart";
 import { DerivClient } from "@/lib/deriv";
+import { DEFAULT_DERIV_APP_ID, validateCredentials } from "@/lib/deriv-config";
+import { Button } from "@/components/ui/button";
 import {
-  applyResult, digitFrequency, digitWins, initialMg, isValidAppId, isValidToken, lastDigit,
+  applyResult, digitFrequency, digitWins, initialMg, lastDigit,
   marketProfile, phasesFor, resolveContract, stakeFor, type ContractKind, type MgState, type StrategyMode,
 } from "@/lib/strategy";
 
@@ -14,6 +16,8 @@ export const Route = createFileRoute("/")({
       { name: "description", content: "Digit strategy hub for Deriv with live ticks, market profile (POC/VAH/VAL), digit frequency and a martingale engine. Demo account first." },
       { property: "og:title", content: "Va-Mod Trading Hub" },
       { property: "og:description", content: "Va-Mod Insight Engine: real Deriv ticks, market profile and digit strategy automation." },
+      { property: "og:type", content: "website" },
+      { name: "twitter:card", content: "summary_large_image" },
     ],
   }),
   component: Hub,
@@ -45,7 +49,7 @@ function Hub() {
   const [colors, setColors] = useState({ bull: "#FFD700", bear: "#9B30FF", poc: "#FFF4B0" });
   const [draft, setDraft] = useState({ name: indName, ...colors });
   // data & connection
-  const [cfg, setCfg] = useState<Cfg>({ appId: "1089", token: "", fcs: "", odds: "", allowLive: false });
+  const [cfg, setCfg] = useState<Cfg>({ appId: DEFAULT_DERIV_APP_ID, token: "", fcs: "", odds: "", allowLive: false });
   const [showCfg, setShowCfg] = useState(false);
   const [demoMode, setDemoMode] = useState(true);
   const [status, setStatus] = useState<"idle" | "connecting" | "open" | "closed">("idle");
@@ -104,25 +108,31 @@ function Hub() {
 
   const connect = useCallback(() => {
     client.current?.close();
-    const c = new DerivClient(cfg.appId || "1089", (s) => setStatus(s), async () => {
+    setAccount(null);
+    setMsg("");
+    const c = new DerivClient(cfg.appId || DEFAULT_DERIV_APP_ID, (s) => {
+      setStatus(s);
+      if (s === "closed") setAccount(null);
+    }, async () => {
       try {
         const syms = await c.send({ active_symbols: "brief" });
-        setSymbols(syms.active_symbols.filter((s: any) => s.market === "synthetic_index" || s.symbol === "frxXAUUSD")
-          .map((s: any) => ({ symbol: s.symbol, name: s.display_name })));
-        if (cfg.token) {
+        setSymbols(syms.active_symbols.filter((s: any) => s.market === "synthetic_index" || (s.underlying_symbol ?? s.symbol) === "frxXAUUSD")
+          .map((s: any) => ({ symbol: s.underlying_symbol ?? s.symbol, name: s.underlying_symbol_name ?? s.display_name ?? s.underlying_symbol ?? s.symbol })));
+        if (cfg.token && !c.modern) {
           const a = await c.send({ authorize: cfg.token });
           setAccount({ loginid: a.authorize.loginid, virtual: !!a.authorize.is_virtual, balance: a.authorize.balance, currency: a.authorize.currency });
-          c.subscribe({ balance: 1 }, (m) => m.balance && setAccount((p) => p && { ...p, balance: m.balance.balance }));
         }
+        if (cfg.token) c.subscribe({ balance: 1 }, (m) => m.balance && setAccount((p) => p && { ...p, balance: Number(m.balance.balance) }));
         subscribeTicks(st.current.symbol);
       } catch (e: any) { setMsg(e.message); }
-    });
+    }, { token: cfg.token, allowLive: cfg.allowLive, onAccount: setAccount, onError: setMsg });
     client.current = c;
     c.connect();
-  }, [cfg.appId, cfg.token, subscribeTicks]);
+  }, [cfg.appId, cfg.token, cfg.allowLive, subscribeTicks]);
 
   useEffect(() => {
     if (demoMode) { client.current?.close(); client.current = null; setStatus("idle"); setAccount(null); return; }
+    setTicks([]);
     connect();
     return () => { client.current?.close(); };
   }, [demoMode, connect]);
@@ -161,7 +171,8 @@ function Hub() {
       won = Math.random() < 0.55 && digitWins(c.type, c.barrier, t.digit) !== undefined;
       net = won ? Math.round(amt * 0.25 * 100) / 100 : -amt;
     } else {
-      const cl = client.current!;
+      const cl = client.current;
+      if (!cl || !s.account) throw new Error("Connect a Deriv account before trading.");
       const prop = await cl.send({ proposal: 1, amount: amt, basis: "stake", contract_type: c.type, currency: s.account?.currency ?? "USD",
         duration: 1, duration_unit: "t", symbol: s.symbol, ...(c.barrier !== undefined ? { barrier: String(c.barrier) } : {}) });
       const buy = await cl.send({ buy: prop.proposal.id, price: amt });
@@ -218,7 +229,7 @@ function Hub() {
           <span className={`rounded-full px-3 py-1 font-mono text-xs ${account && !account.virtual ? "bg-destructive text-destructive-foreground" : "bg-secondary text-primary"}`}>
             ● {conn}{account && ` · ${account.loginid} · ${account.balance} ${account.currency}`}
           </span>
-          <button onClick={() => setShowCfg(true)} className="rounded-md border border-primary px-3 py-1 text-xs text-primary hover:bg-primary hover:text-primary-foreground">API & App Config</button>
+          <Button variant="outline" size="sm" disabled={active} onClick={() => setShowCfg(true)} className="border-primary text-primary">API & App Config</Button>
         </div>
       </header>
       {demoMode && <div className="bg-accent/30 px-5 py-1 text-center text-xs text-accent-foreground">Demo Mode: prices and trades below are SIMULATED — not live market data. Turn off Demo Mode to stream real Deriv ticks.</div>}
@@ -331,29 +342,39 @@ function Hub() {
           </div>
         </aside>
       </div>
-      {showCfg && <ConfigModal cfg={cfg} onClose={() => setShowCfg(false)} onSave={(c) => { setCfg(c); localStorage.setItem(CFG_KEY, JSON.stringify(c)); setShowCfg(false); }} />}
+      {showCfg && <ConfigModal cfg={cfg} onClose={() => setShowCfg(false)} onSave={(c) => {
+        try {
+          localStorage.setItem(CFG_KEY, JSON.stringify(c));
+          setCfg(c);
+          setShowCfg(false);
+          setMsg("Deriv configuration saved. Real-money trading remains " + (c.allowLive ? "enabled by your choice." : "disabled."));
+          return null;
+        } catch { return "Your browser blocked saving. Allow browser storage and try again."; }
+      }} />}
     </div>
   );
 }
 
-function ConfigModal({ cfg, onClose, onSave }: { cfg: Cfg; onClose: () => void; onSave: (c: Cfg) => void }) {
+function ConfigModal({ cfg, onClose, onSave }: { cfg: Cfg; onClose: () => void; onSave: (c: Cfg) => string | null }) {
   const [c, setC] = useState({ ...cfg, token: "" });
   const [err, setErr] = useState("");
   const save = () => {
-    if (!isValidAppId(c.appId)) return setErr("App ID must be numeric.");
-    if (c.token && !isValidToken(c.token)) return setErr("Token format looks invalid (letters and numbers only).");
-    onSave({ ...c, token: c.token || cfg.token });
+    const updated = { ...c, appId: c.appId.trim(), token: c.token.trim() || cfg.token };
+    const error = validateCredentials(updated.appId, updated.token);
+    if (error) return setErr(error);
+    const saveError = onSave(updated);
+    if (saveError) setErr(saveError);
   };
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-background/80 p-4">
-      <div className="w-full max-w-md space-y-3 rounded-lg border border-primary bg-card p-5 text-sm shadow-gold">
-        <h2 className="font-display text-lg text-primary">API & App Config</h2>
+      <div role="dialog" aria-modal="true" aria-labelledby="config-title" className="w-full max-w-md space-y-3 rounded-lg border border-primary bg-card p-5 text-sm shadow-gold">
+        <h2 id="config-title" className="font-display text-lg text-primary">API & App Config</h2>
         <p className="rounded bg-destructive/20 p-2 text-xs">Never share your Deriv API token. Use a token from your DEMO (virtual) account. It is stored only in this browser and never shown again after saving.</p>
         <Field label="Deriv App ID"><input className="inp" value={c.appId} onChange={(e) => setC({ ...c, appId: e.target.value })} /></Field>
         <Field label={`Deriv API Token ${cfg.token ? "(saved — enter a new one to replace)" : ""}`}>
-          <input type="password" autoComplete="off" className="inp" placeholder={cfg.token ? "••••••••••••" : "Paste token"} value={c.token} onChange={(e) => setC({ ...c, token: e.target.value })} />
+          <input type="password" autoComplete="off" spellCheck={false} className="inp" placeholder={cfg.token ? "••••••••••••" : "Paste token or pat_…"} value={c.token} onChange={(e) => setC({ ...c, token: e.target.value })} />
         </Field>
-        {cfg.token && <button className="text-xs text-accent" onClick={() => onSave({ ...cfg, token: "" })}>Remove saved token</button>}
+        {cfg.token && <Button variant="ghost" size="sm" className="text-accent" onClick={() => { const error = onSave({ ...cfg, token: "" }); if (error) setErr(error); }}>Remove saved token</Button>}
         <Field label="FCS API Key (optional, reserved)"><input type="password" className="inp" value={c.fcs} onChange={(e) => setC({ ...c, fcs: e.target.value })} /></Field>
         <Field label="Odds API Key (optional, reserved)"><input type="password" className="inp" value={c.odds} onChange={(e) => setC({ ...c, odds: e.target.value })} /></Field>
         <label className="flex items-center gap-2 rounded border border-destructive p-2 text-xs">
@@ -362,8 +383,8 @@ function ConfigModal({ cfg, onClose, onSave }: { cfg: Cfg; onClose: () => void; 
         </label>
         {err && <p className="text-xs text-destructive">{err}</p>}
         <div className="flex justify-end gap-2">
-          <button onClick={onClose} className="rounded border border-border px-3 py-1">Cancel</button>
-          <button onClick={save} className="rounded bg-primary px-3 py-1 font-bold text-primary-foreground">Save</button>
+          <Button variant="outline" size="sm" onClick={onClose}>Cancel</Button>
+          <Button size="sm" onClick={save}>Save</Button>
         </div>
       </div>
     </div>
