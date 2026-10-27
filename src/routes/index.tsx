@@ -338,7 +338,7 @@ function Hub() {
           const barrier = def.digitBarrier ? d : undefined;
           const amt = recoveryStake(recCfg, bulkStake, st.current.rec);
           jobs.push(execute(kind, barrier, amt, mkt, bulkTicks)
-            .then((net) => record({ symbol: st.current.demoMode ? "SIM" : mkt, type: `${def.sides[bulkSide]}${barrier !== undefined ? " " + barrier : ""}`, stake: amt, result: net > 0 ? "WIN" : "LOSS", profit: net, sim: st.current.demoMode }))
+            .then((net) => { record({ symbol: st.current.demoMode ? "SIM" : mkt, type: `${def.sides[bulkSide]}${barrier !== undefined ? " " + barrier : ""}`, stake: amt, result: net > 0 ? "WIN" : "LOSS", profit: net, sim: st.current.demoMode }); })
             .catch((e) => setMsg(e.message)));
         }
       }
