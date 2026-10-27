@@ -147,7 +147,7 @@ export function computeSignal(prices: number[]): { dir: Direction | null; confid
   if (n >= 3) {
     const p = cs[n - 3]!, q = cs[n - 2]!, z = cs[n - 1]!;
     if (p.c < p.o && q.c > q.o && z.c > p.h) smc = { name: "SMC FVG / OB", score: 1, bias: "CALL", detail: "Bullish order block break" };
-    else if (p.c > p.o && q.c < c.o && z.c < p.l) smc = { name: "SMC FVG / OB", score: 1, bias: "PUT", detail: "Bearish order block break" };
+    else if (p.c > p.o && q.c < q.o && z.c < p.l) smc = { name: "SMC FVG / OB", score: 1, bias: "PUT", detail: "Bearish order block break" };
   }
 
   // 4. Tick velocity

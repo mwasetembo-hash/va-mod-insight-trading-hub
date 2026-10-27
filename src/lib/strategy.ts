@@ -1,5 +1,5 @@
 // Indexed numeric arrays below are always in-bounds.
-export type ContractKind = "DIGITDIFF" | "DIGITOVER" | "DIGITUNDER" | "DIGITEVEN" | "DIGITODD";
+export type ContractKind = "DIGITDIFF" | "DIGITMATCH" | "DIGITOVER" | "DIGITUNDER" | "DIGITEVEN" | "DIGITODD";
 export type StrategyMode = "classic" | "overunder" | "differs" | "evenodd";
 
 export interface MgConfig {
@@ -89,6 +89,7 @@ export function lastDigit(price: number, pip: number) {
 export function digitWins(type: ContractKind, barrier: number | undefined, d: number) {
   switch (type) {
     case "DIGITDIFF": return d !== barrier;
+    case "DIGITMATCH": return d === barrier;
     case "DIGITOVER": return d > (barrier ?? 0);
     case "DIGITUNDER": return d < (barrier ?? 9);
     case "DIGITEVEN": return d % 2 === 0;
@@ -97,3 +98,31 @@ export function digitWins(type: ContractKind, barrier: number | undefined, d: nu
 }
 
 export { isValidToken, isValidAppId } from "./deriv-config";
+
+// ---- System Recovery: win back drawdown with sized recovery stakes ----
+export interface RecoveryConfig {
+  enabled: boolean;
+  /** Fraction of the outstanding drawdown added to the base stake each trade (0-1). */
+  perTrade: number;
+  /** Hard cap on any single recovery stake. */
+  maxStake: number;
+}
+export interface RecoveryState {
+  /** Outstanding losses still to be recovered. */
+  drawdown: number;
+  active: boolean;
+}
+export const initialRecovery: RecoveryState = { drawdown: 0, active: false };
+
+/** Stake while recovering: base plus a fraction of the outstanding drawdown, capped. */
+export function recoveryStake(cfg: RecoveryConfig, base: number, r: RecoveryState) {
+  if (!cfg.enabled || !r.active || r.drawdown <= 0) return r2(base);
+  return r2(Math.min(cfg.maxStake, base + r.drawdown * cfg.perTrade));
+}
+
+/** Feed a settled trade's net profit into the recovery pool. Losses grow it, wins shrink it. */
+export function applyRecovery(cfg: RecoveryConfig, r: RecoveryState, net: number): RecoveryState {
+  if (!cfg.enabled) return { ...initialRecovery };
+  const drawdown = r2(Math.max(0, r.drawdown - net));
+  return { drawdown, active: drawdown > 0 };
+}
