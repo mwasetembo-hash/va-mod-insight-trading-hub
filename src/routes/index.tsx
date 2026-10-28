@@ -11,6 +11,7 @@ import {
   type ContractKind, type MgState, type RecoveryState, type StrategyMode,
 } from "@/lib/strategy";
 import { computeSignal, digitStats, trendStrength } from "@/lib/signals";
+import { clampRunTicks, detectRunDir, runSupported, runWins, type RunDir } from "@/lib/runs";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -28,11 +29,13 @@ export const Route = createFileRoute("/")({
 
 type Tick = { epoch: number; quote: number; digit: number };
 type Ledger = { time: string; symbol: string; type: string; stake: number; result: "WIN" | "LOSS"; profit: number; sim: boolean };
-type Cfg = { appId: string; token: string; fcs: string; odds: string; allowLive: boolean };
+type Cfg = { appId: string; token: string; fcs: string; odds: string; allowLive: boolean; aiModel?: string; aiKeys?: Record<string, string> };
 type ScanRow = { symbol: string; name: string; trend: number; conf: number; dir: string; coldDigit: number; diffConf: number };
 type BulkKind = "MATCH_DIFF" | "OVER_UNDER" | "EVEN_ODD";
-type Tab = "strategy" | "scanner" | "bulk";
+type Tab = "strategy" | "runs" | "scanner" | "bulk";
 
+const AI_MODELS = ["MiniMax-M2.1", "stepfun-ai/step-3.5-flash", "DeepSeek-V4-Flash", "gemini-3.1-flash-lite-preview", "moonshotai/kimi-k2.6", "kimi-k2.5", "gpt-4o-mini", "gpt-5-mini", "grok-4.20-fast", "grok-imagine-image-lite", "qwen3.6-27b", "Qwen3.6", "glm-4.6", "z-ai/glm-5.1", "openai/zai-org/GLM-4.7"];
+const SETTINGS_KEY = "mwase-settings";
 const CFG_KEY = "vamod-config";
 const TF: Record<string, number> = { "60": 3600, "15": 900, "5": 300, tick: 10 };
 const LABEL: Record<string, string> = { DIGITDIFF: "Differs", DIGITMATCH: "Matches", DIGITOVER: "Over", DIGITUNDER: "Under", DIGITEVEN: "Even", DIGITODD: "Odd" };
@@ -99,6 +102,16 @@ function Hub() {
   const [bulkN, setBulkN] = useState(10);
   const [markets, setMarkets] = useState<string[]>(["R_100"]);
   const [bulkRunning, setBulkRunning] = useState(false);
+  // only ups / only downs
+  const [runAuto, setRunAuto] = useState(false);
+  const [runTicks, setRunTicks] = useState(3);
+  const [runStake, setRunStake] = useState(0.35);
+  const [runDirMode, setRunDirMode] = useState<"auto" | RunDir>("auto");
+  const [runTP, setRunTP] = useState(2);
+  const [runSL, setRunSL] = useState(5);
+  const [runPnl, setRunPnl] = useState(0);
+  const runRef = useRef(false);
+  const specCache = useRef<Record<string, any[]>>({});
 
   const client = useRef<DerivClient | null>(null);
   const unsubTicks = useRef<(() => void) | null>(null);
@@ -108,6 +121,14 @@ function Hub() {
 
   useEffect(() => {
     try { const s = localStorage.getItem(CFG_KEY); if (s) setCfg((c) => ({ ...c, ...JSON.parse(s) })); } catch {}
+    try {
+      const raw = localStorage.getItem(SETTINGS_KEY);
+      if (raw) {
+        const s = JSON.parse(raw);
+        const set: Record<string, (v: any) => void> = { stake: setStake, target: setTarget, tf: setTf, mode: setMode, over: setOver, under: setUnder, mult: setMult, maxLv: setMaxLv, startAfter: setStartAfter, stopMax: setStopMax, stopLoss: setStopLoss, recOn: setRecOn, recPerTrade: setRecPerTrade, recMaxStake: setRecMaxStake, minConf: setMinConf, bulkStake: setBulkStake, bulkTicks: setBulkTicks, bulkTP: setBulkTP, bulkSL: setBulkSL, bulkN: setBulkN, runTicks: setRunTicks, runStake: setRunStake, runDirMode: setRunDirMode, runSL: setRunSL, runTP: setRunTP };
+        Object.entries(s).forEach(([k, v]) => set[k]?.(v));
+      }
+    } catch {}
   }, []);
 
   const pushTick = useCallback((t: Tick) => {
@@ -349,6 +370,65 @@ function Hub() {
     setBulkRunning(false); st.current.bulkRunning = false;
   }
 
+  // ---- Only Ups / Only Downs engine ----
+  const runSignal = useMemo(() => {
+    if (runDirMode !== "auto") return runDirMode;
+    const p = ticks.slice(-300).map((t) => t.quote);
+    return detectRunDir(p, p.length >= 60 ? computeSignal(p).dir : null);
+  }, [ticks, runDirMode]);
+
+  async function execRun(dir: RunDir, amount: number, n: number): Promise<number> {
+    if (st.current.demoMode) {
+      const entry = st.current.ticks[st.current.ticks.length - 1]?.quote ?? 0;
+      const path: number[] = [];
+      for (let i = 0; i < n; i++) path.push((await nextTick()).quote);
+      return runWins(dir, entry, path) ? r2(amount * (Math.pow(2, n) * 0.9 - 1)) : -amount;
+    }
+    const cl = client.current, acc = st.current.account, sym = st.current.symbol;
+    if (!cl || !acc) throw new Error("Connect a Deriv account before trading.");
+    if (!specCache.current[sym]) {
+      const r = await cl.send({ contracts_for: sym, currency: acc.currency });
+      specCache.current[sym] = r.contracts_for?.available ?? [];
+    }
+    const bad = runSupported(specCache.current[sym], dir, n);
+    if (bad) throw new Error(`${sym}: ${bad} Order blocked.`);
+    const prop = await cl.send({ proposal: 1, amount, basis: "stake", contract_type: dir, currency: acc.currency, duration: n, duration_unit: "t", symbol: sym });
+    const buy = await cl.send({ buy: prop.proposal.id, price: prop.proposal.ask_price ?? amount });
+    return new Promise<number>((res, rej) => {
+      const to = setTimeout(() => rej(new Error("Contract timeout")), 60000);
+      const un = cl.subscribe({ proposal_open_contract: 1, contract_id: buy.buy.contract_id }, (m) => {
+        const p = m.proposal_open_contract;
+        if (p?.is_sold) { clearTimeout(to); un(); res(Number(p.profit)); }
+      });
+    });
+  }
+
+  async function toggleRuns() {
+    if (runRef.current) { runRef.current = false; setRunAuto(false); return; }
+    if (!guardLive()) return;
+    runRef.current = true; setRunAuto(true); setMsg("");
+    let pnl = 0; setRunPnl(0);
+    while (runRef.current) {
+      const p = st.current.ticks.slice(-300).map((t) => t.quote);
+      const dir = runDirMode !== "auto" ? runDirMode : detectRunDir(p, p.length >= 60 ? computeSignal(p).dir : null);
+      if (!dir) { await nextTick(); continue; }
+      try {
+        const net = await execRun(dir, runStake, runTicks);
+        pnl = r2(pnl + net); setRunPnl(pnl);
+        record({ symbol: st.current.demoMode ? "SIM" : st.current.symbol, type: `${dir === "RUNHIGH" ? "Only Ups" : "Only Downs"} ${runTicks}t`, stake: runStake, result: net > 0 ? "WIN" : "LOSS", profit: net, sim: st.current.demoMode });
+      } catch (e: any) { setMsg(e.message); break; }
+      if (pnl >= runTP) { setMsg(`Ups/Downs take-profit $${runTP} reached.`); break; }
+      if (runSL > 0 && pnl <= -runSL) { setMsg("Ups/Downs stop-loss hit."); break; }
+    }
+    runRef.current = false; setRunAuto(false);
+  }
+
+  // ---- Save / load settings ----
+  function saveSettings() {
+    const s = { stake, target, tf, mode, over, under, mult, maxLv, startAfter, stopMax, stopLoss, recOn, recPerTrade, recMaxStake, minConf, bulkStake, bulkTicks, bulkTP, bulkSL, bulkN, runTicks, runStake, runDirMode, runSL, runTP };
+    try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(s)); setMsg("Settings saved in this browser."); } catch { setMsg("Your browser blocked saving settings."); }
+  }
+
   const ranked = useMemo(() => freq.map((v, d) => ({ d, v })).sort((a, b) => b.v - a.v), [freq]);
   const rankOf = (d: number) => ranked.findIndex((r) => r.d === d);
   const hot = Math.max(...freq), cold = Math.min(...freq);
@@ -379,7 +459,7 @@ function Hub() {
       {msg && <div className="bg-secondary px-5 py-1 text-center text-xs text-primary">{msg}</div>}
 
       <nav className="flex gap-1 border-b border-border bg-card/60 px-5 pt-2 backdrop-blur">
-        {([["strategy", "STRATEGY ENGINE"], ["scanner", "HYBRID SCAN ENGINE"], ["bulk", "BULK MULTI-STRIKE"]] as [Tab, string][]).map(([k, l]) => (
+        {([["strategy", "STRATEGY ENGINE"], ["runs", "ONLY UPS / DOWNS"], ["scanner", "HYBRID SCAN ENGINE"], ["bulk", "BULK MULTI-STRIKE"]] as [Tab, string][]).map(([k, l]) => (
           <button key={k} onClick={() => setTab(k)} className={`rounded-t-md px-4 py-2 font-mono text-xs font-bold tracking-wider ${tab === k ? "bg-primary text-primary-foreground shadow-gold" : "text-muted-foreground hover:text-primary"}`}>{l}</button>
         ))}
       </nav>
@@ -429,6 +509,7 @@ function Hub() {
           <button onClick={toggle} className={`w-full rounded-md py-3 font-display font-extrabold tracking-wider shadow-gold ${active ? "bg-destructive text-destructive-foreground" : "bg-primary text-primary-foreground"}`}>
             {active ? "STOP STRATEGY" : "ACTIVATE STRATEGY"}
           </button>
+          <Button variant="outline" className="w-full border-primary text-primary" onClick={saveSettings}>SAVE SETTINGS</Button>
           <p className="text-center font-mono text-[10px] text-muted-foreground">Duration: 1 Tick | Execution: Fast | Source: Digit Edge</p>
         </aside>
 
@@ -447,6 +528,29 @@ function Hub() {
             <span className="absolute right-3 top-3 z-10 font-mono text-xs text-muted-foreground">{demoMode ? "SIM" : symbol} · tick volume</span>
             <PriceChart candles={candles} bull={colors.bull} bear={colors.bear} poc={colors.poc} pocPrice={profile?.poc} />
           </div>
+
+          {tab === "runs" && (
+            <div className="rounded-lg border border-border bg-card p-4 backdrop-blur">
+              <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+                <h2 className="font-display text-primary">Only Ups / Only Downs</h2>
+                <button onClick={toggleRuns} className={`rounded-md px-4 py-2 font-mono text-xs font-bold ${runAuto ? "bg-destructive text-destructive-foreground" : "bg-primary text-primary-foreground"}`}>
+                  {runAuto ? "STOP AUTO" : "START AUTO TRADING"}
+                </button>
+              </div>
+              <div className="grid grid-cols-2 gap-2 sm:grid-cols-5">
+                <Field label="Direction"><Sel v={runDirMode} set={(v) => setRunDirMode(v as typeof runDirMode)} opts={[["auto", "Both (auto-detect)"], ["RUNHIGH", "Only Ups"], ["RUNLOW", "Only Downs"]]} /></Field>
+                <Field label="Ticks (2-5)"><Num v={runTicks} set={(n) => setRunTicks(clampRunTicks(n))} /></Field>
+                <Field label="Stake ($)"><Num v={runStake} set={setRunStake} step={0.01} /></Field>
+                <Field label="Take profit $"><Num v={runTP} set={setRunTP} step={0.5} /></Field>
+                <Field label="Stop loss $"><Num v={runSL} set={setRunSL} step={0.5} /></Field>
+              </div>
+              <div className="mt-3 grid gap-1 font-mono text-xs">
+                <Row k="Detected direction" v={runSignal ? (runSignal === "RUNHIGH" ? "▲ ONLY UPS" : "▼ ONLY DOWNS") : "NO TRADE — waiting for streak"} />
+                <Row k="Session P/L" v={`$${runPnl.toFixed(2)}`} />
+              </div>
+              <p className="mt-2 text-[10px] text-muted-foreground">Every tick must close higher (Ups) or lower (Downs) than the one before. Before each live order the bot checks Deriv lists this contract and tick count for the market, and blocks it otherwise. Real-money accounts are blocked unless you allow them in config.</p>
+            </div>
+          )}
 
           {tab === "scanner" && (
             <div className="rounded-lg border border-border bg-card p-4 backdrop-blur">
@@ -606,9 +710,12 @@ function Hub() {
 
 function ConfigModal({ cfg, onClose, onSave }: { cfg: Cfg; onClose: () => void; onSave: (c: Cfg) => string | null }) {
   const [c, setC] = useState({ ...cfg, token: "" });
+  const [aiDraft, setAiDraft] = useState<Record<string, string>>({});
   const [err, setErr] = useState("");
   const save = () => {
-    const updated = { ...c, appId: c.appId.trim(), token: c.token.trim() || cfg.token };
+    const aiKeys = { ...(cfg.aiKeys ?? {}) };
+    Object.entries(aiDraft).forEach(([k, v]) => { if (v.trim()) aiKeys[k] = v.trim(); });
+    const updated = { ...c, aiKeys, appId: c.appId.trim(), token: c.token.trim() || cfg.token };
     const error = validateCredentials(updated.appId, updated.token);
     if (error) return setErr(error);
     const saveError = onSave(updated);
@@ -626,6 +733,15 @@ function ConfigModal({ cfg, onClose, onSave }: { cfg: Cfg; onClose: () => void; 
         {cfg.token && <Button variant="ghost" size="sm" className="text-accent" onClick={() => { const error = onSave({ ...cfg, token: "" }); if (error) setErr(error); }}>Remove saved token</Button>}
         <Field label="FCS API Key (optional, reserved)"><input type="password" className="inp" value={c.fcs} onChange={(e) => setC({ ...c, fcs: e.target.value })} /></Field>
         <Field label="Odds API Key (optional, reserved)"><input type="password" className="inp" value={c.odds} onChange={(e) => setC({ ...c, odds: e.target.value })} /></Field>
+        <div className="space-y-2 rounded border border-primary/50 p-2">
+          <p className="text-xs font-bold text-primary">AI MODELS</p>
+          <Field label="Active AI model"><Sel v={c.aiModel ?? AI_MODELS[0]} set={(v) => setC({ ...c, aiModel: v })} opts={AI_MODELS.map((m) => [m, m])} /></Field>
+          <Field label={`API key for ${c.aiModel ?? AI_MODELS[0]} ${cfg.aiKeys?.[c.aiModel ?? AI_MODELS[0]] ? "(saved — enter new to replace)" : ""}`}>
+            <input type="password" autoComplete="off" className="inp" placeholder={cfg.aiKeys?.[c.aiModel ?? AI_MODELS[0]] ? "••••••••••••" : "Paste API key"}
+              value={aiDraft[c.aiModel ?? AI_MODELS[0]] ?? ""} onChange={(e) => setAiDraft({ ...aiDraft, [c.aiModel ?? AI_MODELS[0]]: e.target.value })} />
+          </Field>
+          <p className="text-[10px] text-muted-foreground">Keys are stored only in this browser. Saved: {Object.keys(cfg.aiKeys ?? {}).filter((k) => cfg.aiKeys?.[k]).length} model(s).</p>
+        </div>
         <label className="flex items-center gap-2 rounded border border-destructive p-2 text-xs">
           <input type="checkbox" checked={c.allowLive} onChange={(e) => setC({ ...c, allowLive: e.target.checked })} />
           Allow trading on a REAL-money account (off = demo only)
